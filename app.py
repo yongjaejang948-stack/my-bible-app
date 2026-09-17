@@ -1,3 +1,4 @@
+import datetime
 import json
 import google.generativeai as genai
 import streamlit as st
@@ -119,31 +120,76 @@ if "selected_xref" not in st.session_state:
 
 st.title("📖 AI 성경 관주 & 통독 연구소")
 
-# --- 화면 1: 책 형태 성경 읽기 모드 ---
+# --- [사이드바] 통독 목표 및 일차 설정 ---
+st.sidebar.header("🗓️ 통독 목표 및 일정 설정")
+target_days = st.sidebar.number_input(
+    "목표 통독 일수 (일)", min_value=1, max_value=365, value=90
+)
+start_date = st.sidebar.date_input(
+    "통독 시작일", value=datetime.date(2026, 9, 1)
+)
+
+# 오늘이 몇일차인지 자동 계산
+today_date = datetime.date.today()
+passed_days = (today_date - start_date).days + 1
+current_day = max(1, min(passed_days, target_days))
+
+st.sidebar.markdown(f"📌 **시작일:** {start_date}")
+st.sidebar.markdown(
+    f"📍 **오늘 날짜:** {today_date} (통독 **{current_day}일차** / 총"
+    f" {target_days}일)"
+)
+
+# --- 전체 성경을 목표 일수(예: 90일) 분량으로 균등 배분하는 함수 ---
+
+
+@st.cache_data
+def build_reading_plan(data, total_days):
+  total_chars = sum(len(item["text"]) for item in data)
+  target_per_day = total_chars / total_days
+
+  plan = {}
+  day = 1
+  current_chars = 0
+  for item in data:
+    if day not in plan:
+      plan[day] = []
+    plan[day].append(item)
+    current_chars += len(item["text"])
+    if current_chars >= target_per_day and day < total_days:
+      day += 1
+      current_chars = 0
+  return plan
+
+
+reading_plan = build_reading_plan(bible_data, target_days)
+
+# 사용자가 직접 몇일차를 볼지 선택할 수도 있게 제공 (기본값은 오늘 일차)
+selected_day = st.sidebar.number_input(
+    "조회할 읽기 일차 선택 (Day)",
+    min_value=1,
+    max_value=target_days,
+    value=current_day,
+)
+
+# 오늘(선택한 일차) 읽을 전체 구절 목록 가져오기 (중간에 끊기지 않고 전체 출력)
+today_verses = reading_plan.get(selected_day, bible_data)
+
+# --- 화면 1: 책 형태 성경 통독 모드 ---
 if st.session_state.view_mode == "read":
-  st.sidebar.header("🗓️ 통독 설정")
-
-  # 성경 권/장 선택 (기본적으로 한 장 전체가 책처럼 펼쳐지도록)
-  books = list(dict.fromkeys([item["book"] for item in bible_data]))
-  selected_book = st.sidebar.selectbox("성경 선택", books, index=0)
-
-  chapters = list(
-      dict.fromkeys(
-          [item["chapter"] for item in bible_data if item["book"] == selected_book]
-      )
-  )
-  selected_chapter = st.sidebar.selectbox("장 선택", chapters, index=0)
-
-  # 선택한 장 전체 구절 불러오기 (한 구절이 아니라 책처럼 쭉 나옴)
-  today_verses = [
-      item
-      for item in bible_data
-      if item["book"] == selected_book and item["chapter"] == selected_chapter
-  ]
-
   if today_verses:
-    st.markdown(f"## 📜 {selected_book} {selected_chapter}장")
-    st.caption(f"총 {len(today_verses)}개 구절이 수록되어 있습니다.")
+    first_v = today_verses[0]
+    last_v = today_verses[-1]
+
+    st.subheader(
+        f"📖 Day {selected_day} 통독 분량 ({first_v['book']}"
+        f" {first_v['chapter']}:{first_v['verse']} ~ {last_v['book']}"
+        f" {last_v['chapter']}:{last_v['verse']})"
+    )
+    st.caption(
+        f"목표 통독: 총 {target_days}일 중 **{selected_day}일차** 분량입니다. (총"
+        f" {len(today_verses)}개 구절)"
+    )
     st.divider()
 
     # 종이책 질감 및 글자 디자인 커스텀 CSS
@@ -152,12 +198,12 @@ if st.session_state.view_mode == "read":
         <style>
         .bible-box {
             background-color: #FAFAFA;
-            padding: 15px;
-            border-radius: 8px;
+            padding: 12px 15px;
+            border-radius: 6px;
             border-left: 4px solid #D32F2F;
-            margin-bottom: 12px;
+            margin-bottom: 10px;
         }
-        .verse-num {
+        .verse-ref {
             color: #111111;
             font-weight: bold;
             font-size: 1.05em;
@@ -174,27 +220,23 @@ if st.session_state.view_mode == "read":
         unsafe_allow_html=True,
     )
 
-    # 성경책처럼 구절 연속 렌더링
+    # 오늘 읽을 분량 전체를 책처럼 연속 출력
     for v in today_verses:
       ref_key = f"{v['book']} {v['chapter']}:{v['verse']}"
 
-      # 구절(검은색) + 본문 텍스트(빨간색)
+      # 구절명(검은색) + 본문(빨간색)
       st.markdown(
           f"""
             <div class="bible-box">
-                <span class="verse-num">[{v['verse']}절]</span>
+                <span class="verse-ref">[{ref_key}]</span>
                 <span class="verse-text">{v['text']}</span>
             </div>
             """,
           unsafe_allow_html=True,
       )
 
-      # 관주 버튼 및 AI 버튼 레이아웃
-      xrefs = DEFAULT_CROSS_REFS.get(
-          ref_key, [f"관주A ({v['verse']})", f"관주B ({v['verse']})"]
-      )
-
-      # 버튼 간격 넉넉하게 배치 (잘림 방지)
+      # 관주 버튼 및 AI 버튼 레이아웃 (구절별 하단 배치)
+      xrefs = DEFAULT_CROSS_REFS.get(ref_key, ["창세기 1:1", "로마서 5:8"])
       cols = st.columns([2, 2, 2, 2])
 
       for idx, xref in enumerate(xrefs[:3]):
@@ -234,6 +276,6 @@ elif st.session_state.view_mode == "ai_result":
   st.write(st.session_state.ai_analysis_result)
 
   st.markdown("---")
-  if st.button("⬅️ 뒤로가기 (성경책 읽기로 돌아가기)", type="secondary"):
+  if st.button("⬅️ 뒤로가기 (통독 성경으로 돌아가기)", type="secondary"):
     st.session_state.view_mode = "read"
     st.rerun()

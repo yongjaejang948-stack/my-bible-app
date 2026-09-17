@@ -1,265 +1,405 @@
 import streamlit as st
 import json
-import os
 import datetime
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Optional
 import google.generativeai as genai
 
-# ==========================================
-# 1. 기본 설정 및 Gemini AI 초기화
-# ==========================================
+# ====================== 페이지 설정 ======================
 st.set_page_config(
     page_title="AI 성경 관주 & 통독 연구소",
-    page_icon="📖",
+    page_icon="🕊️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# API 키 가져오기 (Secrets 또는 환경변수 우선, 없으면 사이드바 입력)
-api_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
-
-with st.sidebar:
-    st.header("⚙️ 환경 설정")
-    if not api_key:
-        api_key = st.text_input("Gemini API Key 입력", type="password", help="Google AI Studio에서 발급받은 API 키를 입력하세요.")
-    
-    if api_key:
-        genai.configure(api_key=api_key)
-    else:
-        st.warning("⚠️ Gemini API Key를 입력해야 AI 분석을 사용할 수 있습니다.")
-
-# ==========================================
-# 2. 세션 상태 (Session State) 초기화
-# ==========================================
-if "verse_chats" not in st.session_state:
-    st.session_state.verse_chats = {}
-
-if "general_chats" not in st.session_state:
-    st.session_state.general_chats = []
-
-if "active_verse" not in st.session_state:
-    st.session_state.active_verse = None
-
-# ==========================================
-# 3. 유연한 성경 데이터 파서 (Multi-Format & Auto Path)
-# ==========================================
-def parse_raw_json(raw_data: Any) -> List[Dict[str, Any]]:
-    normalized = []
-    if not raw_data:
-        return normalized
-
-    try:
-        # Case A: 리스트 구조 [{ "book": ..., "chapter": ..., ... }]
-        if isinstance(raw_data, list):
-            for item in raw_data:
-                if not isinstance(item, dict):
-                    continue
-                book = item.get("book") or item.get("book_name") or item.get("name") or item.get("b", "미분류")
-                chap = int(item.get("chapter") or item.get("chap") or item.get("c", 1))
-                verse = int(item.get("verse") or item.get("ver") or item.get("v", 1))
-                text = item.get("text") or item.get("content") or item.get("t") or item.get("message", "")
-                cross = item.get("cross_references") or item.get("cross_refs") or item.get("references") or []
-                
-                normalized.append({
-                    "book": str(book).strip(),
-                    "chapter": chap,
-                    "verse": verse,
-                    "text": str(text).strip(),
-                    "cross_refs": cross if isinstance(cross, list) else []
-                })
-
-        # Case B: 딕셔너리 구조 ({ "창세기": { "1": { "1": "..." } } } 등)
-        elif isinstance(raw_data, dict):
-            # 혹시 상위 키에 "bible"이나 "verses" 같은 래퍼가 있는 경우 대응
-            if "bible" in raw_data and isinstance(raw_data["bible"], (list, dict)):
-                return parse_raw_json(raw_data["bible"])
-            if "verses" in raw_data and isinstance(raw_data["verses"], list):
-                return parse_raw_json(raw_data["verses"])
-
-            for b_name, b_val in raw_data.items():
-                if isinstance(b_val, dict):
-                    for c_num, c_val in b_val.items():
-                        try:
-                            c_int = int(c_num)
-                        except ValueError:
-                            continue
-                        if isinstance(c_val, dict):
-                            for v_num, v_val in c_val.items():
-                                try:
-                                    v_int = int(v_num)
-                                except ValueError:
-                                    continue
-                                v_text = v_val if isinstance(v_val, str) else v_val.get("text", "")
-                                cross = v_val.get("cross_refs", []) if isinstance(v_val, dict) else []
-                                normalized.append({
-                                    "book": str(b_name).strip(),
-                                    "chapter": c_int,
-                                    "verse": v_int,
-                                    "text": str(v_text).strip(),
-                                    "cross_refs": cross
-                                })
-                        elif isinstance(c_val, list):
-                            for idx, v_text in enumerate(c_val, start=1):
-                                normalized.append({
-                                    "book": str(b_name).strip(),
-                                    "chapter": c_int,
-                                    "verse": idx,
-                                    "text": str(v_text).strip() if isinstance(v_text, str) else str(v_text.get("text", "")),
-                                    "cross_refs": []
-                                })
-    except Exception as e:
-        st.sidebar.error(f"데이터 정규화 중 오류: {e}")
-    
-    return normalized
-
-def load_bible_from_disk() -> List[Dict[str, Any]]:
-    # 다양한 가능 경로 탐색
-    candidate_paths = [
-        "bible.json",
-        "Bible.json",
-        "data/bible.json",
-        "data/Bible.json",
-        "src/bible.json",
-        "assets/bible.json"
-    ]
-    encodings = ["utf-8-sig", "utf-8", "cp949"]
-    
-    for path in candidate_paths:
-        if os.path.exists(path):
-            for enc in encodings:
-                try:
-                    with open(path, "r", encoding=enc) as f:
-                        raw = json.load(f)
-                        parsed = parse_raw_json(raw)
-                        if parsed:
-                            return parsed
-                except Exception:
-                    continue
-    return []
-
-# 사이드바 성경 파일 업로드 옵션 제공
-with st.sidebar:
-    st.markdown("---")
-    st.subheader("📁 성경 데이터")
-    uploaded_file = st.file_uploader("bible.json 직접 업로드 (선택)", type=["json"])
-
-# 데이터 로드 로직
-if uploaded_file is not None:
-    try:
-        raw_uploaded = json.load(uploaded_file)
-        bible_data = parse_raw_json(raw_uploaded)
-        st.sidebar.success(f"✅ 업로드 파일 로드 완료 ({len(bible_data):,} 구절)")
-    except Exception as e:
-        st.sidebar.error(f"업로드 파일 파싱 실패: {e}")
-        bible_data = []
+# ====================== Gemini API 설정 ======================
+if "GEMINI_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 else:
-    bible_data = load_bible_from_disk()
-    if bible_data:
-        st.sidebar.success(f"📖 bible.json 연동 성공 ({len(bible_data):,} 구절)")
+    st.error("Gemini API 키가 설정되지 않았습니다. .streamlit/secrets.toml에 GEMINI_API_KEY를 추가하세요.")
 
-# 파일이 전혀 없거나 로드 실패 시 테스트용 기본 샘플 로드
-if not bible_data:
-    st.sidebar.info("💡 성경 파일 로드 실패/부재로 샘플 데이터가 작동합니다.")
-    bible_data = [
-        {"book": "창세기", "chapter": 1, "verse": 1, "text": "태초에 하나님이 천지를 창조하시니라.", "cross_refs": ["요한복음 1:1-3", "히브리서 11:3", "시편 33:6"]},
-        {"book": "창세기", "chapter": 1, "verse": 2, "text": "땅이 혼돈하고 공허하며 흑암이 깊음 위에 있고 하나님의 영은 수면 위에 운행하시니라.", "cross_refs": ["예레미야 4:23", "시편 104:30"]},
-        {"book": "창세기", "chapter": 1, "verse": 3, "text": "하나님이 이르시되 빛이 있으라 하시니 빛이 있었고", "cross_refs": ["고린도후서 4:6", "시편 33:9"]},
-        {"book": "창세기", "chapter": 2, "verse": 1, "text": "천지와 만물이 다 이루어지니라.", "cross_refs": ["출애굽기 20:11"]},
-        {"book": "요한복음", "chapter": 1, "verse": 1, "text": "태초에 말씀이 계시니라 이 말씀이 하나님과 함께 계셨으니 이 말씀은 곧 하나님이시니라.", "cross_refs": ["창세기 1:1", "요한일서 1:1"]}
-    ]
+# ====================== 세션 상태 초기화 ======================
+if "bible_data" not in st.session_state:
+    st.session_state.bible_data = []
+if "reading_plan" not in st.session_state:
+    st.session_state.reading_plan = []
+if "current_day" not in st.session_state:
+    st.session_state.current_day = 1
+if "view_mode" not in st.session_state:
+    st.session_state.view_mode = "read"
+if "selected_verse" not in st.session_state:
+    st.session_state.selected_verse = None
+if "ai_chat_history" not in st.session_state:
+    st.session_state.ai_chat_history = []          # 구절별 대화
+if "global_chat_history" not in st.session_state:
+    st.session_state.global_chat_history = []      # 전체 질문 기록
+if "verse_chat_history" not in st.session_state:
+    st.session_state.verse_chat_history = {}       # { "창1:1": [{"role":.., "content":..}, ...] }
+if "current_verse_key" not in st.session_state:
+    st.session_state.current_verse_key = None
 
-# ==========================================
-# 4. 버그 수정된 통독 스케줄 알고리즘
-# ==========================================
-def get_chapters_list(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    chapters = []
-    seen = set()
-    for row in data:
-        key = (row["book"], row["chapter"])
-        if key not in seen:
-            seen.add(key)
-            chapters.append({"book": row["book"], "chapter": row["chapter"]})
-    return chapters
-
-all_chapters = get_chapters_list(bible_data)
-total_chapters = len(all_chapters)
-
-with st.sidebar:
-    st.markdown("---")
-    st.subheader("📅 통독 스케줄러")
-    target_days = st.number_input("목표 통독 일수", min_value=1, max_value=365, value=90, step=5)
-    start_date = st.date_input("통독 시작일", value=datetime.date.today())
-    
-    # 일차 계산
-    days_passed = (datetime.date.today() - start_date).days + 1
-    current_day = max(1, min(days_passed, target_days))
-    
-    selected_day = st.slider("읽을 일차 선택", min_value=1, max_value=target_days, value=current_day)
-    st.caption(f"📌 오늘은 시작일로부터 **{days_passed}일차**입니다.")
-
-# ⚠️ 버그 수정: 장 수가 목표 일수보다 적더라도 최소 1장 이상 배정되도록 개선
-def get_day_chapters(target_day: int, total_d: int, chaps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not chaps:
-        return []
-    total_ch = len(chaps)
-    
-    # 장 수가 목표 일수 이하일 경우 (샘플 모드 등): 하루 1장씩 보여주고, 초과 시 전체 순환
-    if total_ch <= total_d:
-        idx = (target_day - 1) % total_ch
-        return [chaps[idx]]
-    
-    # 일반적인 통독 분할 로직 (총 장 수가 더 많을 때)
-    start_idx = int((target_day - 1) * total_ch / total_d)
-    end_idx = int(target_day * total_ch / total_d)
-    
-    if target_day == total_d:
-        end_idx = total_ch
-        
-    # start와 end가 같아져 빈 리스트가 되는 현상 방지
-    if start_idx >= end_idx and start_idx < total_ch:
-        end_idx = start_idx + 1
-        
-    return chaps[start_idx:end_idx]
-
-today_chapters = get_day_chapters(selected_day, target_days, all_chapters)
-
-# ==========================================
-# 5. Gemini API 질의 헬퍼 함수
-# ==========================================
-def query_gemini(prompt: str, history: List[Dict[str, Any]] = None) -> str:
-    if not api_key:
-        return "⚠️ 좌측 사이드바에 Gemini API Key를 입력해주세요."
+# ====================== JSON 파서 (강화판) ======================
+def load_bible(file) -> List[Dict]:
+    """bible.json을 다양한 형태로 파싱하여 표준 리스트로 반환"""
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        messages = []
-        if history:
-            for h in history:
-                role = "user" if h["role"] == "user" else "model"
-                messages.append({"role": role, "parts": [h["content"]]})
-        
-        messages.append({"role": "user", "parts": [prompt]})
-        response = model.generate_content(messages)
+        content = file.read()
+        if isinstance(content, bytes):
+            for encoding in ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr']:
+                try:
+                    text = content.decode(encoding)
+                    break
+                except:
+                    continue
+            else:
+                text = content.decode('utf-8', errors='ignore')
+        else:
+            text = content
+
+        data = json.loads(text)
+
+        # 1. 리스트 형태
+        if isinstance(data, list):
+            formatted = []
+            for item in data:
+                if isinstance(item, dict):
+                    book = item.get('book') or item.get('book_name') or item.get('name') or ''
+                    chapter = item.get('chapter') or item.get('chap') or item.get('c') or 0
+                    verse = item.get('verse') or item.get('ver') or item.get('v') or 0
+                    text_val = item.get('text') or item.get('content') or item.get('verse_text') or ''
+                    if book and chapter and verse:
+                        formatted.append({
+                            "book": str(book).strip(),
+                            "chapter": int(chapter),
+                            "verse": int(verse),
+                            "text": str(text_val).strip()
+                        })
+            return formatted
+
+        # 2. 딕셔너리 형태 (책 → 장 → 절)
+        elif isinstance(data, dict):
+            formatted = []
+            for book, chapters in data.items():
+                if isinstance(chapters, dict):
+                    for ch_str, verses in chapters.items():
+                        try:
+                            ch = int(ch_str)
+                        except:
+                            continue
+                        if isinstance(verses, dict):
+                            for v_str, txt in verses.items():
+                                try:
+                                    v = int(v_str)
+                                except:
+                                    continue
+                                formatted.append({
+                                    "book": str(book).strip(),
+                                    "chapter": ch,
+                                    "verse": v,
+                                    "text": str(txt).strip()
+                                })
+            return formatted
+
+        return []
+    except Exception as e:
+        st.error(f"파일 파싱 오류: {str(e)}")
+        return []
+
+# ====================== 통독 계획 생성 (장 단위) ======================
+def build_reading_plan_by_chapter(bible_data: List[Dict], target_days: int = 90, start_date=None) -> List[Dict]:
+    if not bible_data:
+        return []
+
+    # 장별로 그룹핑
+    chapters = {}
+    for item in bible_data:
+        key = (item["book"], item["chapter"])
+        if key not in chapters:
+            chapters[key] = []
+        chapters[key].append(item)
+
+    sorted_chapters = sorted(chapters.items(), key=lambda x: (x[0][0], x[0][1]))
+    total_chapters = len(sorted_chapters)
+    chapters_per_day = max(1, total_chapters // target_days)
+
+    plan = []
+    day = 1
+    idx = 0
+    while idx < total_chapters:
+        day_chapters = sorted_chapters[idx:idx + chapters_per_day]
+        verses = []
+        for (book, ch), ch_verses in day_chapters:
+            verses.extend(ch_verses)
+        plan.append({
+            "day": day,
+            "chapters": [f"{book} {ch}" for (book, ch), _ in day_chapters],
+            "verses": verses
+        })
+        idx += chapters_per_day
+        day += 1
+
+    # 날짜 계산
+    if start_date is None:
+        start_date = datetime.date.today()
+    for i, p in enumerate(plan):
+        p["date"] = start_date + datetime.timedelta(days=i)
+
+    return plan
+
+# ====================== Gemini 호출 함수 ======================
+def call_gemini(prompt: str, max_tokens: int = 2048) -> str:
+    if "GEMINI_API_KEY" not in st.secrets:
+        return "API 키가 설정되지 않았습니다."
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"❌ Gemini API 오류: {str(e)}"
+        return f"AI 호출 오류: {str(e)}"
 
-# ==========================================
-# 6. 메인 화면 UI
-# ==========================================
+# ====================== 사이드바 ======================
+with st.sidebar:
+    st.title("⚙️ 환경 설정")
+    
+    uploaded_file = st.file_uploader("bible.json 업로드", type=["json"])
+    if uploaded_file is not None:
+        st.session_state.bible_data = load_bible(uploaded_file)
+        if st.session_state.bible_data:
+            st.success(f"✅ {len(st.session_state.bible_data)}구절 로드 완료")
+        else:
+            st.error("파일을 읽을 수 없습니다.")
+
+    target_days = st.number_input("목표 통독 일수", min_value=30, max_value=365, value=90, step=1)
+    start_date = st.date_input("통독 시작일", value=datetime.date.today())
+
+    if st.button("통독 계획 생성"):
+        if st.session_state.bible_data:
+            st.session_state.reading_plan = build_reading_plan_by_chapter(
+                st.session_state.bible_data, target_days, start_date
+            )
+            st.session_state.current_day = 1
+            st.success("통독 계획 생성 완료!")
+        else:
+            st.warning("bible.json을 먼저 업로드하세요.")
+
+    if st.session_state.reading_plan:
+        today = datetime.date.today()
+        current_day = 1
+        for p in st.session_state.reading_plan:
+            if p["date"] <= today:
+                current_day = p["day"]
+        st.session_state.current_day = current_day
+
+        st.info(f"오늘은 **{current_day}일차** 입니다.")
+
+    st.divider()
+
+    # ==================== 전체 질문창 ====================
+    st.subheader("💬 전체 AI 질문")
+    global_question = st.text_area("성경 전체에 대해 질문하세요", key="global_q")
+    if st.button("전체 질문하기", key="global_btn"):
+        if global_question.strip():
+            with st.spinner("AI가 답변 중..."):
+                prompt = f"""당신은 성경 전문가입니다. 다음 질문에 대해 성경적으로 깊이 있게 답변해 주세요.
+
+질문: {global_question}
+
+답변:"""
+                answer = call_gemini(prompt)
+                st.session_state.global_chat_history.append({
+                    "question": global_question,
+                    "answer": answer,
+                    "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                st.success("답변 저장 완료!")
+
+    # 전체 질문 기록 표시
+    if st.session_state.global_chat_history:
+        with st.expander("📜 전체 질문 기록", expanded=False):
+            for i, chat in enumerate(st.session_state.global_chat_history):
+                st.markdown(f"**Q{i+1}.** {chat['question']}")
+                st.markdown(f"**A:** {chat['answer']}")
+                st.caption(chat['timestamp'])
+                st.divider()
+
+# ====================== 메인 화면 ======================
 st.title("🕊️ AI 성경 관주 & 통독 연구소")
 
-tab_reading, tab_general_chat, tab_history = st.tabs([
-    "📖 성경 통독 & 구절 연구",
-    "💬 자유 성경 AI Q&A",
-    "📜 AI 질의응답 기록 보관소"
-])
+if not st.session_state.reading_plan:
+    st.info("사이드바에서 bible.json을 업로드하고 통독 계획을 생성하세요.")
+    st.stop()
 
-# ------------------------------------------
-# TAB 1: 통독 본문 & 구절 AI 대화
-# ------------------------------------------
-with tab_reading:
-    if st.session_state.active_verse is not None:
-        v = st.session_state.active_verse
-        v_key = f"{v['book']} {v['chapter']}:{v['verse']}"
+plan = st.session_state.reading_plan
+current_day = st.session_state.current_day
+
+if current_day > len(plan):
+    current_day = len(plan)
+    st.session_state.current_day = current_day
+
+today_plan = plan[current_day - 1]
+
+st.subheader(f"📖 {current_day}일차 ({today_plan['date'].strftime('%Y-%m-%d')})")
+st.caption(f"읽을 장: {', '.join(today_plan['chapters'])}")
+
+# 구절 렌더링
+for verse in today_plan["verses"]:
+    verse_key = f"{verse['book']}{verse['chapter']}:{verse['verse']}"
+    
+    with st.container():
+        st.markdown(f"**{verse_key}**  {verse['text']}")
         
-        c
+        col1, col2 = st.columns([1, 3])
+        
+        with col1:
+            if st.button("🤖 AI 해석", key=f"ai_{verse_key}"):
+                st.session_state.selected_verse = verse
+                st.session_state.current_verse_key = verse_key
+                st.session_state.view_mode = "ai_result"
+        
+        with col2:
+            # 구절별 채팅 기록 표시
+            if verse_key in st.session_state.verse_chat_history:
+                with st.expander(f"💬 이 구절에 대한 AI 대화 ({len(st.session_state.verse_chat_history[verse_key])})", expanded=False):
+                    for msg in st.session_state.verse_chat_history[verse_key]:
+                        if msg["role"] == "user":
+                            st.markdown(f"**🙋‍♂️ 질문:** {msg['content']}")
+                        else:
+                            st.markdown(f"**🤖 답변:** {msg['content']}")
+                    st.divider()
+
+st.divider()
+
+# ==================== 구절 질문창 (현재 구절에 특화) ====================
+if st.session_state.current_verse_key:
+    st.subheader(f"💬 현재 구절({st.session_state.current_verse_key})에 대한 질문")
+    
+    verse_q = st.text_area("이 구절에 대해 질문하세요", key="verse_q")
+    
+    if st.button("구절 질문하기", key="verse_btn"):
+        if verse_q.strip() and st.session_state.current_verse_key:
+            with st.spinner("AI가 답변 중..."):
+                verse = st.session_state.selected_verse or {}
+                prompt = f"""현재 읽고 있는 구절: {st.session_state.current_verse_key} - {verse.get('text', '')}
+
+사용자 질문: {verse_q}
+
+이 구절과 관련하여 성경적으로 깊이 있게 답변해 주세요. 이전 대화도 고려해서 자연스럽게 이어지게 해주세요."""
+                
+                answer = call_gemini(prompt)
+                
+                if st.session_state.current_verse_key not in st.session_state.verse_chat_history:
+                    st.session_state.verse_chat_history[st.session_state.current_verse_key] = []
+                
+                st.session_state.verse_chat_history[st.session_state.current_verse_key].append({
+                    "role": "user",
+                    "content": verse_q,
+                    "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                st.session_state.verse_chat_history[st.session_state.current_verse_key].append({
+                    "role": "assistant",
+                    "content": answer,
+                    "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                st.success("답변 저장 완료!")
+                st.rerun()
+
+# 구절 질문 기록 (책별 → 구절번호순 → 시간순)
+if st.session_state.verse_chat_history:
+    st.subheader("📜 구절 질문 기록")
+    
+    # 책별로 그룹핑
+    book_groups = {}
+    for vkey, chats in st.session_state.verse_chat_history.items():
+        book = re.match(r"([가-힣]+)", vkey)
+        if book:
+            book_name = book.group(1)
+            if book_name not in book_groups:
+                book_groups[book_name] = []
+            book_groups[book_name].append((vkey, chats))
+    
+    for book_name in sorted(book_groups.keys()):
+        with st.expander(f"📖 {book_name}", expanded=True):
+            # 구절번호 순으로 정렬
+            sorted_verses = sorted(book_groups[book_name], key=lambda x: (
+                int(re.search(r":(\d+)", x[0]).group(1)) if re.search(r":(\d+)", x[0]) else 0
+            ))
+            
+            for vkey, chats in sorted_verses:
+                st.markdown(f"**{vkey}**")
+                # 시간순 정렬 (이미 append 순서가 시간순)
+                for msg in chats:
+                    if msg["role"] == "user":
+                        st.markdown(f"🙋‍♂️ {msg['content']}")
+                    else:
+                        st.markdown(f"🤖 {msg['content']}")
+                st.divider()
+
+# ==================== AI 결과 모드 ====================
+if st.session_state.view_mode == "ai_result" and st.session_state.selected_verse:
+    verse = st.session_state.selected_verse
+    verse_key = st.session_state.current_verse_key
+    
+    st.header(f"🤖 AI 해석 - {verse_key}")
+    st.markdown(f"**본문:** {verse['text']}")
+    
+    if st.button("← 읽기 화면으로 돌아가기"):
+        st.session_state.view_mode = "read"
+        st.rerun()
+    
+    # 초기 AI 해석
+    if not st.session_state.ai_chat_history or st.session_state.ai_chat_history[0].get("verse_key") != verse_key:
+        prompt = f"""성경 구절: {verse_key} - {verse['text']}
+
+이 구절의 의미와 신학적 중요성, 연관된 다른 구절들을 종합하여 깊이 있게 설명해 주세요."""
+        initial_answer = call_gemini(prompt)
+        st.session_state.ai_chat_history = [{
+            "verse_key": verse_key,
+            "role": "assistant",
+            "content": initial_answer,
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }]
+    
+    # AI 대화 표시
+    for msg in st.session_state.ai_chat_history:
+        if msg.get("verse_key") == verse_key:
+            if msg["role"] == "user":
+                st.markdown(f"**🙋‍♂️ 질문:** {msg['content']}")
+            else:
+                st.markdown(f"**🤖 답변:** {msg['content']}")
+    
+    # 추가 질문
+    follow_up = st.text_input("추가로 질문할 내용이 있나요?", key="follow_up")
+    if st.button("계속 질문하기"):
+        if follow_up.strip():
+            with st.spinner("AI가 답변 중..."):
+                history_text = "\n".join([
+                    f"{'사용자' if m['role']=='user' else 'AI'}: {m['content']}" 
+                    for m in st.session_state.ai_chat_history 
+                    if m.get("verse_key") == verse_key
+                ])
+                
+                prompt = f"""현재 구절: {verse_key} - {verse['text']}
+
+이전 대화:
+{history_text}
+
+새로운 질문: {follow_up}
+
+자연스럽게 이어지는 답변을 해주세요."""
+                
+                answer = call_gemini(prompt)
+                st.session_state.ai_chat_history.append({
+                    "verse_key": verse_key,
+                    "role": "user",
+                    "content": follow_up,
+                    "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                st.session_state.ai_chat_history.append({
+                    "verse_key": verse_key,
+                    "role": "assistant",
+                    "content": answer,
+                    "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                st.rerun()
+
+st.caption("© 2026 AI 성경 관주 & 통독 연구소 | Streamlit Community Cloud")

@@ -81,7 +81,7 @@ BOOK_NAMES = [
 
 @st.cache_data
 def load_bible():
-  # 1. 실제 전체 성경 데이터 JSON 파일이 있다면 로드
+  # 1. 실제 전체 성경 데이터 JSON 파일 로드 시도
   try:
     with open("bible_data.json", "r", encoding="utf-8") as f:
       raw_data = json.load(f)
@@ -103,7 +103,7 @@ def load_bible():
   except:
     pass
 
-  # 2. 파일이 없을 경우: 창세기 주요 본문 및 전체 장 시뮬레이션 생성
+  # 2. 파일이 없을 경우: 66권 전체 1,189장 시뮬레이션 생성
   book_chapters = {
       "창세기": 50,
       "출애굽기": 40,
@@ -173,68 +173,15 @@ def load_bible():
       "요한계시록": 22,
   }
 
-  # 창세기 1~2장 실제 샘플 텍스트 탑재
-  genesis_samples = {
-      (1, 1): "태초에 하나님이 천지를 창조하시니라",
-      (
-          1,
-          2,
-      ): (
-          "땅이 혼돈하고 공허하며 흑암이 깊음 위에 있고 하나님의 영은 수면"
-          " 위에 운행하시니라"
-      ),
-      (1, 3): "하나님이 이르시되 빛이 있으라 하시니 빛이 있었고",
-      (1, 4): "빛이 하나님이 보시기에 좋았더라 하나님이 빛과 어둠을 나누사",
-      (
-          1,
-          5,
-      ): (
-          "하나님이 빛을 낮이라 부르시고 어둠을 밤이라 부르시니라 저녁이 되고"
-          " 아침이 되니 이는 첫째 날이니라"
-      ),
-      (1, 6): "하나님이 이르시되 물 가운데 궁창이 있어 물과 물로 나뉘라 하시고",
-      (
-          1,
-          7,
-      ): (
-          "하나님이 궁창을 만드사 궁창 아래의 물과 궁창 위의 물로 나뉘게"
-          " 하시니 그대로 되니라"
-      ),
-      (
-          1,
-          8,
-      ): (
-          "하나님이 궁창을 하늘이라 부르시니라 저녁이 되고 아침이 되니 이는"
-          " 둘째 날이니라"
-      ),
-      (
-          1,
-          9,
-      ): (
-          "하나님이 이르시되 천하의 물이 한 곳으로 모이고 뭍이 드러나라 하시니"
-          " 그대로 되니라"
-      ),
-      (
-          1,
-          10,
-      ): (
-          "하나님이 뭍을 땅이라 부르시고 모인 물을 바다라 부르시니 하나님이"
-          " 보시기에 좋았더라"
-      ),
-  }
-
   generated_bible = []
   for b_name, c_count in book_chapters.items():
     for c in range(1, c_count + 1):
       v_count = 15  # 장당 평균 절 수
       for v in range(1, v_count + 1):
-        if b_name == "창세기" and (c, v) in genesis_samples:
-          text = genesis_samples[(c, v)]
-        else:
-          text = (
-              f"[{b_name} {c}장 {v}절] 하나님의 말씀과 은혜가 풍성히 임하는"
-              " 귀한 구절입니다."
-          )
+        text = (
+            f"{{{b_name} {c}장 {v}절}} 주님의 진리의 말씀과 은혜의 언약이"
+            " 선포되는 거룩한 본문입니다."
+        )
         generated_bible.append(
             {"book": b_name, "chapter": c, "verse": v, "text": text}
         )
@@ -250,7 +197,7 @@ DEFAULT_CROSS_REFS = {
 }
 
 # 세션 상태 초기화
-if "view_mode" not in st.session_state:
+if "view_model" not in st.session_state:
   st.session_state.view_mode = "read"
 if "ai_analysis_result" not in st.session_state:
   st.session_state.ai_analysis_result = ""
@@ -279,6 +226,7 @@ st.sidebar.markdown(
 )
 
 
+# --- 장(Chapter) 단위로 깔끔하게 묶어서 분배하는 함수 ---
 @st.cache_data
 def build_reading_plan_by_chapter(data, total_days):
   chapters_dict = {}
@@ -334,7 +282,7 @@ if st.session_state.view_mode == "read":
     )
     st.caption(
         f"목표 통독: 총 {target_days}일 중 **{selected_day}일차** 분량입니다. (총"
-        f" {len(today_verses)}개 구절 / 장 단위 구성)"
+        f" {len(today_verses)}개 구절 / 온전한 장 단위 구성)"
     )
     st.divider()
 

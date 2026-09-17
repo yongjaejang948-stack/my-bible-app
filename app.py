@@ -91,14 +91,18 @@ def load_bible():
   raw_data = None
   used_filename = None
 
+  # 다양한 인코딩 시도 (utf-8, utf-8-sig, cp949)
   for fname in possible_filenames:
-    try:
-      with open(fname, "r", encoding="utf-8") as f:
-        raw_data = json.load(f)
-        used_filename = fname
-        break
-    except:
-      continue
+    for enc in ["utf-8-sig", "utf-8", "cp949"]:
+      try:
+        with open(fname, "r", encoding=enc) as f:
+          raw_data = json.load(f)
+          used_filename = fname
+          break
+      except:
+        continue
+    if raw_data is not None:
+      break
 
   formatted_data = []
 
@@ -106,7 +110,8 @@ def load_bible():
     # 1. 리스트 형태인 경우
     if isinstance(raw_data, list):
       for item in raw_data:
-        # 책 이름 추출
+        if not isinstance(item, dict):
+          continue
         b_val = (
             item.get("book")
             or item.get("book_name")
@@ -116,98 +121,110 @@ def load_bible():
         if isinstance(b_val, int) and 1 <= b_val <= 66:
           book_name = BOOK_NAMES[b_val - 1]
         else:
-          book_name = str(b_val)
+          book_name = str(b_val) if b_val else "창세기"
 
-        # 만약 책 안에 chapters 배열이 따로 있는 구조라면
-        if "chapters" in item and isinstance(item["chapters"], list):
-          for c_idx, c_val in enumerate(item["chapters"]):
-            c_num = c_idx + 1
-            if isinstance(c_val, list):
-              for v_idx, v_text in enumerate(c_val):
-                formatted_data.append({
-                    "book": book_name,
-                    "chapter": c_num,
-                    "verse": v_idx + 1,
-                    "text": str(v_text).strip(),
-                })
-            elif isinstance(c_val, dict):
-              # 챕터가 객체인 경우 등
-              pass
-        else:
-          # 일반적인 절 단위 리스트
-          chapter = (
-              item.get("chapter") or item.get("chap") or item.get("c") or 1
-          )
-          verse = item.get("verse") or item.get("ver") or item.get("v") or 1
-          text = (
-              item.get("text")
-              or item.get("content")
-              or item.get("message")
-              or item.get("verse_text")
-              or ""
-          )
-          if text:
+        chapter = (
+            item.get("chapter")
+            or item.get("chap")
+            or item.get("c")
+            or item.get("chapter_number")
+            or 1
+        )
+        verse = (
+            item.get("verse")
+            or item.get("ver")
+            or item.get("v")
+            or item.get("verse_number")
+            or 1
+        )
+        text = (
+            item.get("text")
+            or item.get("content")
+            or item.get("message")
+            or item.get("verse_text")
+            or ""
+        )
+
+        if text:
+          try:
             formatted_data.append({
                 "book": book_name,
                 "chapter": int(chapter),
                 "verse": int(verse),
                 "text": str(text).strip(),
             })
+          except:
+            pass
 
-    # 2. 딕셔너리 형태인 경우 (책 이름이 키인 경우 등)
+    # 2. 딕셔너리 형태인 경우 (책 이름이 키인 구조)
     elif isinstance(raw_data, dict):
       for b_key, b_val in raw_data.items():
-        if isinstance(b_val, list):
-          for item in b_val:
-            chapter = (
-                item.get("chapter")
-                or item.get("chap")
-                or item.get("chapter_num")
-                or 1
-            )
-            verse = (
-                item.get("verse")
-                or item.get("ver")
-                or item.get("verse_num")
-                or 1
-            )
-            text = (
-                item.get("text")
-                or item.get("content")
-                or item.get("message")
-                or ""
-            )
-            if text:
-              formatted_data.append({
-                  "book": str(b_key),
-                  "chapter": int(chapter),
-                  "verse": int(verse),
-                  "text": str(text).strip(),
-              })
-        elif isinstance(b_val, dict):
+        b_name = str(b_key)
+        if isinstance(b_val, dict):
           for c_key, c_val in b_val.items():
+            try:
+              c_num = int(c_key)
+            except:
+              continue
+
+            # c_val이 딕셔너리인 경우 (절 번호 -> 본문)
             if isinstance(c_val, dict):
               for v_key, v_text in c_val.items():
-                formatted_data.append({
-                    "book": str(b_key),
-                    "chapter": int(c_key),
-                    "verse": int(v_key),
-                    "text": str(v_text).strip(),
-                })
+                try:
+                  v_num = int(v_key)
+                  formatted_data.append({
+                      "book": b_name,
+                      "chapter": c_num,
+                      "verse": v_num,
+                      "text": str(v_text).strip(),
+                  })
+                except:
+                  pass
+            # c_val이 리스트인 경우 (인덱스가 곧 절 번호 - 1인 형태)
             elif isinstance(c_val, list):
-              for v_idx, v_text in enumerate(c_val):
-                formatted_data.append({
-                    "book": str(b_key),
-                    "chapter": int(c_key),
-                    "verse": v_idx + 1,
-                    "text": str(v_text).strip(),
-                })
+              for v_idx, v_item in enumerate(c_val):
+                v_num = v_idx + 1
+                if isinstance(v_item, str):
+                  formatted_data.append({
+                      "book": b_name,
+                      "chapter": c_num,
+                      "verse": v_num,
+                      "text": v_item.strip(),
+                  })
+                elif isinstance(v_item, dict):
+                  t = (
+                      v_item.get("text")
+                      or v_item.get("content")
+                      or v_item.get("verse")
+                  )
+                  if t:
+                    formatted_data.append({
+                        "book": b_name,
+                        "chapter": c_num,
+                        "verse": v_num,
+                        "text": str(t).strip(),
+                    })
+        elif isinstance(b_val, list):
+          for item in b_val:
+            if isinstance(item, dict):
+              c = item.get("chapter") or item.get("chap") or 1
+              v = item.get("verse") or item.get("ver") or 1
+              t = item.get("text") or item.get("content") or ""
+              if t:
+                try:
+                  formatted_data.append({
+                      "book": b_name,
+                      "chapter": int(c),
+                      "verse": int(v),
+                      "text": str(t).strip(),
+                  })
+                except:
+                  pass
 
-  # 데이터가 성공적으로 파싱되었다면 무조건 사용 (개수 제한 해제)
   if formatted_data:
-    return formatted_data
+    return formatted_data, used_filename
 
-  # 파일을 전혀 못 읽었을 때만 작동하는 기본 시뮬레이션
+  # 파일을 전혀 읽지 못한 경우 시뮬레이션 반환
   book_chapters = {
       "창세기": 50,
       "출애굽기": 40,
@@ -288,10 +305,10 @@ def load_bible():
         generated_bible.append(
             {"book": b_name, "chapter": c, "verse": v, "text": text}
         )
-  return generated_bible
+  return generated_bible, None
 
 
-bible_data = load_bible()
+bible_data, loaded_filename = load_bible()
 
 # 대표 관주 매핑
 DEFAULT_CROSS_REFS = {
@@ -311,6 +328,17 @@ st.title("📖 AI 성경 관주 & 통독 연구소")
 
 # --- [사이드바] 통독 목표 및 일정 설정 ---
 st.sidebar.header("🗓️ 통독 목표 및 일정 설정")
+
+# 파일 로드 상태 표시
+if loaded_filename:
+  st.sidebar.success(
+      f"✅ 성경 파일 로드 성공: `{loaded_filename}` ({len(bible_data):,}구절)"
+  )
+else:
+  st.sidebar.error(
+      "⚠️ 실제 성경 파일을 읽지 못해 시뮬레이션 본문이 출력 중입니다."
+  )
+
 target_days = st.sidebar.number_input(
     "목표 통독 일수 (일)", min_value=1, max_value=365, value=90
 )
@@ -343,6 +371,11 @@ def build_reading_plan_by_chapter(data, total_days):
   total_chapters = len(chapter_keys)
 
   plan = {}
+  if total_chapters == 0:
+    for day in range(1, total_days + 1):
+      plan[day] = data
+    return plan
+
   chapters_per_day = total_chapters / total_days
 
   for day in range(1, total_days + 1):

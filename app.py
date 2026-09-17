@@ -81,29 +81,92 @@ BOOK_NAMES = [
 
 @st.cache_data
 def load_bible():
-  # 1. 실제 전체 성경 데이터 JSON 파일 로드 시도
+  # 업로드된 실제 JSON 파일 유연하게 파싱
   try:
     with open("bible_data.json", "r", encoding="utf-8") as f:
       raw_data = json.load(f)
-    if len(raw_data) > 1000:
-      formatted_data = []
+
+    formatted_data = []
+
+    # 형태 1: 리스트 구조인 경우 (각 절이 객체로 나열된 경우)
+    if isinstance(raw_data, list):
       for item in raw_data:
-        book_val = item.get("book") or item.get("book_name")
-        if isinstance(book_val, int) and 1 <= book_val <= 66:
-          book_name = BOOK_NAMES[book_val - 1]
+        b_val = (
+            item.get("book")
+            or item.get("book_name")
+            or item.get("name")
+            or item.get("book_no")
+        )
+        if isinstance(b_val, int) and 1 <= b_val <= 66:
+          book_name = BOOK_NAMES[b_val - 1]
         else:
-          book_name = str(book_val)
-        formatted_data.append({
-            "book": book_name,
-            "chapter": item["chapter"],
-            "verse": item["verse"],
-            "text": item["text"].strip(),
-        })
+          book_name = str(b_val)
+
+        chapter = item.get("chapter") or item.get("chap") or item.get("c") or 1
+        verse = item.get("verse") or item.get("ver") or item.get("v") or 1
+        text = (
+            item.get("text")
+            or item.get("content")
+            or item.get("message")
+            or item.get("verse_text")
+            or ""
+        )
+
+        if text:
+          formatted_data.append({
+              "book": book_name,
+              "chapter": int(chapter),
+              "verse": int(verse),
+              "text": str(text).strip(),
+          })
+
+    # 형태 2: 딕셔너리 구조인 경우 (책 이름별로 묶여 있는 경우)
+    elif isinstance(raw_data, dict):
+      for b_key, b_val in raw_data.items():
+        if isinstance(b_val, list):
+          for item in b_val:
+            chapter = (
+                item.get("chapter")
+                or item.get("chap")
+                or item.get("chapter_num")
+                or 1
+            )
+            verse = (
+                item.get("verse")
+                or item.get("ver")
+                or item.get("verse_num")
+                or 1
+            )
+            text = (
+                item.get("text")
+                or item.get("content")
+                or item.get("message")
+                or ""
+            )
+            if text:
+              formatted_data.append({
+                  "book": str(b_key),
+                  "chapter": int(chapter),
+                  "verse": int(verse),
+                  "text": str(text).strip(),
+              })
+        elif isinstance(b_val, dict):
+          for c_key, c_val in b_val.items():
+            if isinstance(c_val, dict):
+              for v_key, v_text in c_val.items():
+                formatted_data.append({
+                    "book": str(b_key),
+                    "chapter": int(c_key),
+                    "verse": int(v_key),
+                    "text": str(v_text).strip(),
+                })
+
+    if len(formatted_data) > 1000:
       return formatted_data
-  except:
+  except Exception as e:
     pass
 
-  # 2. 파일이 없을 경우: 66권 전체 1,189장 시뮬레이션 생성
+  # 만약 파싱 중 문제가 생길 경우를 대비한 기본 시뮬레이션
   book_chapters = {
       "창세기": 50,
       "출애굽기": 40,
@@ -176,8 +239,7 @@ def load_bible():
   generated_bible = []
   for b_name, c_count in book_chapters.items():
     for c in range(1, c_count + 1):
-      v_count = 15  # 장당 평균 절 수
-      for v in range(1, v_count + 1):
+      for v in range(1, 16):
         text = (
             f"{{{b_name} {c}장 {v}절}} 주님의 진리의 말씀과 은혜의 언약이"
             " 선포되는 거룩한 본문입니다."
@@ -197,7 +259,7 @@ DEFAULT_CROSS_REFS = {
 }
 
 # 세션 상태 초기화
-if "view_model" not in st.session_state:
+if "view_mode" not in st.session_state:
   st.session_state.view_mode = "read"
 if "ai_analysis_result" not in st.session_state:
   st.session_state.ai_analysis_result = ""

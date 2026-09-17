@@ -81,16 +81,32 @@ BOOK_NAMES = [
 
 @st.cache_data
 def load_bible():
-  # 업로드된 실제 JSON 파일 유연하게 파싱
-  try:
-    with open("bible_data.json", "r", encoding="utf-8") as f:
-      raw_data = json.load(f)
+  possible_filenames = [
+      "bible.json",
+      "bible_data.json",
+      "data.json",
+      "krv.json",
+      "ko_bible.json",
+  ]
+  raw_data = None
+  used_filename = None
 
-    formatted_data = []
+  for fname in possible_filenames:
+    try:
+      with open(fname, "r", encoding="utf-8") as f:
+        raw_data = json.load(f)
+        used_filename = fname
+        break
+    except:
+      continue
 
-    # 형태 1: 리스트 구조인 경우 (각 절이 객체로 나열된 경우)
+  formatted_data = []
+
+  if raw_data:
+    # 1. 리스트 형태인 경우
     if isinstance(raw_data, list):
       for item in raw_data:
+        # 책 이름 추출
         b_val = (
             item.get("book")
             or item.get("book_name")
@@ -102,25 +118,43 @@ def load_bible():
         else:
           book_name = str(b_val)
 
-        chapter = item.get("chapter") or item.get("chap") or item.get("c") or 1
-        verse = item.get("verse") or item.get("ver") or item.get("v") or 1
-        text = (
-            item.get("text")
-            or item.get("content")
-            or item.get("message")
-            or item.get("verse_text")
-            or ""
-        )
+        # 만약 책 안에 chapters 배열이 따로 있는 구조라면
+        if "chapters" in item and isinstance(item["chapters"], list):
+          for c_idx, c_val in enumerate(item["chapters"]):
+            c_num = c_idx + 1
+            if isinstance(c_val, list):
+              for v_idx, v_text in enumerate(c_val):
+                formatted_data.append({
+                    "book": book_name,
+                    "chapter": c_num,
+                    "verse": v_idx + 1,
+                    "text": str(v_text).strip(),
+                })
+            elif isinstance(c_val, dict):
+              # 챕터가 객체인 경우 등
+              pass
+        else:
+          # 일반적인 절 단위 리스트
+          chapter = (
+              item.get("chapter") or item.get("chap") or item.get("c") or 1
+          )
+          verse = item.get("verse") or item.get("ver") or item.get("v") or 1
+          text = (
+              item.get("text")
+              or item.get("content")
+              or item.get("message")
+              or item.get("verse_text")
+              or ""
+          )
+          if text:
+            formatted_data.append({
+                "book": book_name,
+                "chapter": int(chapter),
+                "verse": int(verse),
+                "text": str(text).strip(),
+            })
 
-        if text:
-          formatted_data.append({
-              "book": book_name,
-              "chapter": int(chapter),
-              "verse": int(verse),
-              "text": str(text).strip(),
-          })
-
-    # 형태 2: 딕셔너리 구조인 경우 (책 이름별로 묶여 있는 경우)
+    # 2. 딕셔너리 형태인 경우 (책 이름이 키인 경우 등)
     elif isinstance(raw_data, dict):
       for b_key, b_val in raw_data.items():
         if isinstance(b_val, list):
@@ -160,13 +194,20 @@ def load_bible():
                     "verse": int(v_key),
                     "text": str(v_text).strip(),
                 })
+            elif isinstance(c_val, list):
+              for v_idx, v_text in enumerate(c_val):
+                formatted_data.append({
+                    "book": str(b_key),
+                    "chapter": int(c_key),
+                    "verse": v_idx + 1,
+                    "text": str(v_text).strip(),
+                })
 
-    if len(formatted_data) > 1000:
-      return formatted_data
-  except Exception as e:
-    pass
+  # 데이터가 성공적으로 파싱되었다면 무조건 사용 (개수 제한 해제)
+  if formatted_data:
+    return formatted_data
 
-  # 만약 파싱 중 문제가 생길 경우를 대비한 기본 시뮬레이션
+  # 파일을 전혀 못 읽었을 때만 작동하는 기본 시뮬레이션
   book_chapters = {
       "창세기": 50,
       "출애굽기": 40,

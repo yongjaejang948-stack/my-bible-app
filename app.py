@@ -102,22 +102,28 @@ def load_bible():
 
 bible_data = load_bible()
 
-# 대표 관주 데이터베이스
+# 대표 관주 매핑
 DEFAULT_CROSS_REFS = {
     "요한복음 3:16": ["창세기 22:2", "로마서 5:8", "요한1서 4:9"],
     "창세기 1:1": ["요한복음 1:1", "히브리서 11:3", "시편 33:6"],
     "로마서 5:8": ["요한복음 3:16", "요한1서 4:10", "에베소서 2:4"],
-    "마태복음 28:19": ["사도행전 1:8", "고린도후서 13:13"],
 }
+
+# 세션 상태 초기화 (화면 전환 제어용)
+if "view_mode" not in st.session_state:
+  st.session_state.view_mode = "read"  # 'read' 또는 'ai_result'
+if "ai_analysis_result" not in st.session_state:
+  st.session_state.ai_analysis_result = ""
+if "selected_xref" not in st.session_state:
+  st.session_state.selected_xref = None
 
 st.title("📖 AI 성경 관주 & 통독 연구소")
 
-tab1, tab2 = st.tabs(["📅 기간별 성경 통독 & 관주", "🔍 개별 구절 검색"])
-
-with tab1:
-  st.sidebar.header("🗓️ 통독 기간 설정")
+# --- 화면 1: 성경 읽기 & 관주 모드 ---
+if st.session_state.view_mode == "read":
+  st.sidebar.header("🗓️ 통독 설정")
   target_days = st.sidebar.number_input(
-      "목표 통독 일수 (일)", min_value=1, max_value=1000, value=90
+      "목표 통독 일수", min_value=1, max_value=1000, value=90
   )
 
   @st.cache_data
@@ -139,9 +145,8 @@ with tab1:
 
   plan = build_plan(bible_data, target_days)
   selected_day = st.number_input(
-      "읽을 일차 (Day 선택)", min_value=1, max_value=target_days, value=1
+      "읽을 일차 (Day)", min_value=1, max_value=target_days, value=1
   )
-
   today_verses = plan.get(selected_day, [])
 
   if today_verses:
@@ -151,89 +156,66 @@ with tab1:
         f"📍 Day {selected_day}: {first_v['book']} {first_v['chapter']}:{first_v['verse']} ~"
         f" {last_v['book']} {last_v['chapter']}:{last_v['verse']}"
     )
-    st.caption(
-        f"오늘의 읽기 분량: 총 {len(today_verses)}개 구절 (약"
-        f" {sum(len(v['text']) for v in today_verses)}자)"
-    )
     st.divider()
 
-    if "selected_xref" not in st.session_state:
-      st.session_state.selected_xref = None
-
+    # 스케치하신 상단 구절 + 관주 + AI 버튼 레이아웃
     for v in today_verses:
       ref_key = f"{v['book']} {v['chapter']}:{v['verse']}"
 
+      # 책처럼 읽는 본문: 구절(검은색) + 본문 텍스트(빨간색)
       st.markdown(
-          f"**<span style='color:black;'>[{ref_key}]</span>** <span"
-          f" style='color:#D32F2F; font-size:1.1em;"
+          f"**<span style='color:black; font-size:1.1em;'>[{ref_key}]</span>**"
+          f" <span style='color:#D32F2F; font-size:1.15em;"
           f" font-weight:500;'>{v['text']}</span>",
           unsafe_allow_html=True,
       )
 
-      xrefs = DEFAULT_CROSS_REFS.get(ref_key, [])
-      if xrefs:
-        st.write("🔗 **연결 관주:**")
-        cols = st.columns(len(xrefs))
-        for idx, xref in enumerate(xrefs):
-          if cols[idx].button(xref, key=f"btn_{ref_key}_{xref}"):
-            st.session_state.selected_xref = xref
+      # 관주 버튼 및 AI 버튼 한 줄 배치
+      xrefs = DEFAULT_CROSS_REFS.get(ref_key, ["관주1", "관주2"])
+
+      # 버튼들을 한 라인에 가로 배열
+      btn_cols = st.columns(len(xrefs) + 2)
+
+      # 관주 버튼 렌더링
+      for idx, xref in enumerate(xrefs):
+        if btn_cols[idx].button(
+            f"🔗 {xref}", key=f"btn_{ref_key}_{xref}", use_container_width=True
+        ):
+          st.session_state.selected_xref = xref
+
+      # 스케치 제일 우측 [AI 버튼]
+      if btn_cols[-1].button(
+          "🤖 AI 해석", key=f"ai_{ref_key}", type="primary", use_container_width=True
+      ):
+        with st.spinner("Gemini가 구절과 연관 관주의 영적 의미를 분석 중입니다..."):
+          prompt = f"""
+                    성경 구절: '{ref_key}'
+                    본문: "{v['text']}"
+                    연관 관주: {', '.join(xrefs)}
+
+                    이 구절과 관주들이 가지는 신학적/영적 의미를 상세히 해석해줘.
+                    """
+          res = model.generate_content(prompt)
+          st.session_state.ai_analysis_result = res.text
+          st.session_state.view_mode = "ai_result"
+          st.rerun()
 
       st.markdown("---")
 
+    # 선택한 관주 클릭 시 바로 밑에 본문 표시
     if st.session_state.selected_xref:
-      st.info(f"📌 선택한 관주 구절: **{st.session_state.selected_xref}**")
-      xref_parts = st.session_state.selected_xref.split()
-      if len(xref_parts) == 2:
-        b_name = xref_parts[0]
-        c_v = xref_parts[1].split(":")
-        found = [
-            i
-            for i in bible_data
-            if i["book"] == b_name
-            and i["chapter"] == int(c_v[0])
-            and i["verse"] == int(c_v[1])
-        ]
-        if found:
-          st.write(f"↪ *\"{found[0]['text']}\"*")
+      st.info(f"📌 선택한 관주: **{st.session_state.selected_xref}**")
 
-    st.markdown("### 🤖 오늘의 통독 & 관주 AI 종합 해석")
-    if st.button("✨ 오늘 읽은 구절 + 연관 관주 AI 자동 해석하기"):
-      today_text = " ".join([
-          f"{v['book']} {v['chapter']}:{v['verse']} - {v['text']}"
-          for v in today_verses[:10]
-      ])
+# --- 화면 2: AI 해석 상세 창 (새로운 창으로 전환) ---
+elif st.session_state.view_mode == "ai_result":
+  st.subheader("💡 AI 구절 & 관주 종합 해석 결과")
+  st.markdown("---")
 
-      prompt = f"""
-            오늘 사용자가 읽은 성경 본문 목록입니다:
-            {today_text}
+  # AI 분석 결과 출력
+  st.write(st.session_state.ai_analysis_result)
 
-            위 본문 전체와 구절들에 연결된 주요 관주들의 신학적 의미를 종합하여 다음 3가지를 한국어로 작성해줘:
-            1. **오늘 본문의 핵심 주제 요약**
-            2. **구절 간/관주 간 영적 연결성 분석** (구약 예언과 신약 성취, 신학적 맥락)
-            3. **오늘의 삶에 적용할 묵상 질문 2가지**
-            """
-
-      with st.spinner("Gemini가 오늘 본문과 관주 텍스트 전체를 종합 분석 중입니다..."):
-        res = model.generate_content(prompt)
-        st.success("AI 해석이 완료되었습니다!")
-        st.write(res.text)
-
-with tab2:
-  col1, col2, col3 = st.columns(3)
-  books = list(dict.fromkeys([item["book"] for item in bible_data]))
-  with col1:
-    sb = st.selectbox("성경 선택", books, key="s1")
-  chapters = list(
-      dict.fromkeys([item["chapter"] for item in bible_data if item["book"] == sb])
-  )
-  with col2:
-    sc = st.selectbox("장 선택", chapters, key="s2")
-  verses = [item for item in bible_data if item["book"] == sb and item["chapter"] == sc]
-  with col3:
-    sv = st.selectbox("절 선택", [v["verse"] for v in verses], key="s3")
-
-  selected_item = next(v for v in verses if v["verse"] == sv)
-  st.markdown(
-      f"### {selected_item['book']} {selected_item['chapter']}:{selected_item['verse']}"
-  )
-  st.info(f'"{selected_item["text"]}"')
+  st.markdown("---")
+  # 스케치대로 뒤로가기 누르면 다시 성경 읽기 화면으로 복귀
+  if st.button("⬅️ 뒤로가기 (성경 목록으로 돌아가기)", type="secondary"):
+    st.session_state.view_mode = "read"
+    st.rerun()
